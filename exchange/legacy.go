@@ -48,8 +48,8 @@ func (bidder *adaptedAdapter) requestBid(ctx context.Context, request *openrtb.B
 		legacyBids[i].Price = legacyBids[i].Price * bidAdjustment
 	}
 
-	finalResponse, moreErrs := toNewResponse(legacyBids, legacyBidder, name)
-	return finalResponse, append(errs, moreErrs...)
+	seatBid, moreErrs := toNewResponse(legacyBids, legacyBidder, name)
+	return seatBid, append(errs, moreErrs...)
 }
 
 // ----------------------------------------------------------------------------

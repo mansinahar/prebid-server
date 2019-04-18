@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/buger/jsonparser"
-	"github.com/prebid/prebid-server/errortypes"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -14,7 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/evanphx/json-patch"
+	"github.com/buger/jsonparser"
+	"github.com/prebid/prebid-server/errortypes"
+
+	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/golang/glog"
 	"github.com/julienschmidt/httprouter"
 	"github.com/mxmCherry/openrtb"

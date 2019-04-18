@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/mxmCherry/openrtb"
+	native_request "github.com/mxmCherry/openrtb/native/request"
+	native_response "github.com/mxmCherry/openrtb/native/response"
 	"github.com/prebid/prebid-server/adapters"
 	"github.com/prebid/prebid-server/config"
 	"github.com/prebid/prebid-server/currencies"
@@ -39,7 +42,7 @@ type IdFetcher interface {
 
 type exchange struct {
 	adapterMap          map[openrtb_ext.BidderName]adaptedBidder
-	me                  pbsmetrics.MetricsEngine
+	metricsEngine       pbsmetrics.MetricsEngine
 	cache               prebid_cache_client.Client
 	cacheTime           time.Duration
 	gDPR                gdpr.Permissions
@@ -66,7 +69,7 @@ func NewExchange(client *http.Client, cache prebid_cache_client.Client, cfg *con
 	e.adapterMap = newAdapterMap(client, cfg, infos)
 	e.cache = cache
 	e.cacheTime = time.Duration(cfg.CacheURL.ExpectedTimeMillis) * time.Millisecond
-	e.me = metricsEngine
+	e.metricsEngine = metricsEngine
 	e.gDPR = gDPR
 	e.currencyConverter = currencyConverter
 	e.UsersyncIfAmbiguous = cfg.GDPR.UsersyncIfAmbiguous
@@ -139,6 +142,10 @@ func (e *exchange) HoldAuction(ctx context.Context, bidRequest *openrtb.BidReque
 	conversions := e.currencyConverter.Rates()
 
 	adapterBids, adapterExtra := e.getAllBids(auctionCtx, cleanRequests, aliases, bidAdjustmentFactors, blabels, conversions)
+	adapterBids, err := removeInvalidNativeBids(bidRequest.Imp, adapterBids)
+	if err != nil {
+		return nil, fmt.Errorf("Error validating native bids : %s", err.Error())
+	}
 	bidCategory, adapterBids, err := applyCategoryMapping(requestExt, adapterBids, *categoriesFetcher, targData)
 	auc := newAuction(adapterBids, len(bidRequest.Imp))
 	if err != nil {
@@ -169,7 +176,12 @@ func (e *exchange) makeAuctionContext(ctx context.Context, needsCache bool) (auc
 }
 
 // This piece sends all the requests to the bidder adapters and gathers the results.
-func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest, aliases map[string]string, bidAdjustments map[string]float64, blabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels, conversions currencies.Conversions) (map[openrtb_ext.BidderName]*pbsOrtbSeatBid, map[openrtb_ext.BidderName]*seatResponseExtra) {
+func (e *exchange) getAllBids(ctx context.Context,
+	cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest,
+	aliases map[string]string, bidAdjustments map[string]float64,
+	bLabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels,
+	conversions currencies.Conversions) (map[openrtb_ext.BidderName]*pbsOrtbSeatBid,
+	map[openrtb_ext.BidderName]*seatResponseExtra) {
 	// Set up pointers to the bid results
 	adapterBids := make(map[openrtb_ext.BidderName]*pbsOrtbSeatBid, len(cleanRequests))
 	adapterExtra := make(map[openrtb_ext.BidderName]*seatResponseExtra, len(cleanRequests))
@@ -178,17 +190,17 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 	for bidderName, req := range cleanRequests {
 		// Here we actually call the adapters and collect the bids.
 		coreBidder := resolveBidder(string(bidderName), aliases)
-		bidderRunner := e.recoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, conversions currencies.Conversions) {
+		bidderRunner := e.recoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidLabels *pbsmetrics.AdapterLabels, conversions currencies.Conversions) {
 			// Passing in aName so a doesn't change out from under the go routine
-			if bidlabels.Adapter == "" {
-				glog.Errorf("Exchange: bidlables for %s (%s) missing adapter string", aName, coreBidder)
-				bidlabels.Adapter = coreBidder
+			if bidLabels.Adapter == "" {
+				glog.Errorf("Exchange: bidLabels for %s (%s) missing adapter string", aName, coreBidder)
+				bidLabels.Adapter = coreBidder
 			}
 			brw := new(bidResponseWrapper)
 			brw.bidder = aName
 			// Defer basic metrics to insure we capture them after all the values have been set
 			defer func() {
-				e.me.RecordAdapterRequest(*bidlabels)
+				e.metricsEngine.RecordAdapterRequest(*bidLabels)
 			}()
 			start := time.Now()
 
@@ -196,7 +208,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			if givenAdjustment, ok := bidAdjustments[string(aName)]; ok {
 				adjustmentFactor = givenAdjustment
 			}
-			bids, err := e.adapterMap[coreBidder].requestBid(ctx, request, aName, adjustmentFactor, conversions)
+			bids, errs := e.adapterMap[coreBidder].requestBid(ctx, request, aName, adjustmentFactor, conversions)
 
 			// Add in time reporting
 			elapsed := time.Since(start)
@@ -205,23 +217,23 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			ae := new(seatResponseExtra)
 			ae.ResponseTimeMillis = int(elapsed / time.Millisecond)
 			// Timing statistics
-			e.me.RecordAdapterTime(*bidlabels, time.Since(start))
-			serr := errsToBidderErrors(err)
-			bidlabels.AdapterBids = bidsToMetric(brw.adapterBids)
-			bidlabels.AdapterErrors = errorsToMetric(err)
+			e.metricsEngine.RecordAdapterTime(*bidLabels, time.Since(start))
+			serr := errsToBidderErrors(errs)
+			bidLabels.AdapterBids = bidsToMetric(brw.adapterBids)
+			bidLabels.AdapterErrors = errorsToMetric(errs)
 			// Append any bid validation errors to the error list
 			ae.Errors = serr
 			brw.adapterExtra = ae
 			if bids != nil {
 				for _, bid := range bids.bids {
 					var cpm = float64(bid.bid.Price * 1000)
-					e.me.RecordAdapterPrice(*bidlabels, cpm)
-					e.me.RecordAdapterBidReceived(*bidlabels, bid.bidType, bid.bid.AdM != "")
+					e.metricsEngine.RecordAdapterPrice(*bidLabels, cpm)
+					e.metricsEngine.RecordAdapterBidReceived(*bidLabels, bid.bidType, bid.bid.AdM != "")
 				}
 			}
 			chBids <- brw
 		}, chBids)
-		go bidderRunner(bidderName, coreBidder, req, blabels[coreBidder], conversions)
+		go bidderRunner(bidderName, coreBidder, req, bLabels[coreBidder], conversions)
 	}
 	// Wait for the bidders to do their thing
 	for i := 0; i < len(cleanRequests); i++ {
@@ -238,7 +250,7 @@ func (e *exchange) recoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.
 		defer func() {
 			if r := recover(); r != nil {
 				glog.Errorf("OpenRTB auction recovered panic from Bidder %s: %v. Stack trace is: %v", coreBidder, r, string(debug.Stack()))
-				e.me.RecordAdapterPanic(*bidlabels)
+				e.metricsEngine.RecordAdapterPanic(*bidlabels)
 				// Let the master request know that there is no data here
 				brw := new(bidResponseWrapper)
 				brw.adapterExtra = new(seatResponseExtra)
@@ -321,6 +333,109 @@ func (e *exchange) buildBidResponse(ctx context.Context, liveAdapters []openrtb_
 	return bidResponse, err
 }
 
+func removeInvalidNativeBids(imps []openrtb.Imp, seatBids map[openrtb_ext.BidderName]*pbsOrtbSeatBid) (map[openrtb_ext.BidderName]*pbsOrtbSeatBid, error) {
+	impsByImpID := mapImpsbyImpID(imps)
+	seatBidsToRemove := make([]openrtb_ext.BidderName, 0)
+	for bidderName, seatBid := range seatBids {
+		if seatBid == nil {
+			// seatBidsToRemove = append(seatBidsToRemove, bidderName)
+			continue
+		}
+		bidsToRemove := make([]int, 0)
+		for bidIdx, bid := range seatBid.bids {
+			bidImpID := bid.bid.ImpID
+			native := impsByImpID[bidImpID].Native
+
+			// If the imp is not for a native ad then move on to the next imp
+			if native == nil || len(native.Request) == 0 {
+				continue
+			}
+
+			// Unmarshal native request
+			var nativeRequest native_request.Request
+			// This should never really error here as native requests are validated before the auction
+			// in openrtb2/auction.go
+			if err := json.Unmarshal(json.RawMessage(native.Request), &nativeRequest); err != nil {
+				return seatBids, err
+			}
+
+			// validate this bid. If invalid, reject bid
+			if !validateNativeBid(bid, nativeRequest) {
+				bidsToRemove = append(bidsToRemove, bidIdx)
+				continue
+			}
+		}
+
+		if len(bidsToRemove) == len(seatBid.bids) {
+			// if all bids are invalid - remove entire seat bid
+			seatBidsToRemove = append(seatBidsToRemove, bidderName)
+		} else {
+			// remove all invalid bids
+			seatBid.bids = removeBids(seatBid.bids, bidsToRemove)
+		}
+	}
+	return removeSeatBids(seatBids, seatBidsToRemove), nil
+}
+
+func validateNativeBid(bid *pbsOrtbBid, nativeRequest native_request.Request) bool {
+	// Unmarshal native response
+	var nativeResponse native_response.Response
+	if err := json.Unmarshal(json.RawMessage(bid.bid.AdM), &nativeResponse); err != nil {
+		return false
+	}
+
+	// validate the native spec version
+	if nativeResponse.Ver != "" && nativeRequest.Ver != nativeResponse.Ver {
+		return false
+	}
+
+	reqAssets := nativeRequest.Assets
+	respAssets, err := mapRespAssetsByID(nativeResponse.Assets)
+	// mapRespAssetsByID returns an error if the assets don't have an ID associated
+	// So, if it returns an error, reject the bid
+	if err != nil {
+		return false
+	}
+
+	// Go through the assets and validate each of them, even if a single one is
+	// invalid, reject the bid
+	for _, reqAsset := range reqAssets {
+		// Get the corresponding response asset
+		_, ok := respAssets[reqAsset.ID]
+		// If there is no asset with that ID in the bid response and the request doesn't
+		// require that asset then we can move on to the next asset
+		if !ok && (reqAsset.Required == 0) {
+			continue
+		}
+		// If the asset is required in the request and the bid response doesn't have it
+		// then reject the bid
+		if !ok && (reqAsset.Required == 1) {
+			return false
+		}
+	}
+	return true
+}
+
+func mapRespAssetsByID(assets []native_response.Asset) (map[int64]native_response.Asset, error) {
+	assetsByID := make(map[int64]native_response.Asset)
+	for _, asset := range assets {
+		// @TODO(mnahar) confirm that 0 is not a valid asset ID
+		if asset.ID <= 0 {
+			return nil, errors.New("asset is missing required property asset ID")
+		}
+		assetsByID[asset.ID] = asset
+	}
+	return assetsByID, nil
+}
+
+func mapImpsbyImpID(imps []openrtb.Imp) map[string]openrtb.Imp {
+	impsByImpID := make(map[string]openrtb.Imp)
+	for _, imp := range imps {
+		impsByImpID[imp.ID] = imp
+	}
+	return impsByImpID
+}
+
 func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrtb_ext.BidderName]*pbsOrtbSeatBid, categoriesFetcher stored_requests.CategoryFetcher, targData *targetData) (map[string]string, map[openrtb_ext.BidderName]*pbsOrtbSeatBid, error) {
 	res := make(map[string]string)
 
@@ -332,13 +447,13 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 
 	dedupe := make(map[string]bidDedupe)
 
-	//If includebrandcategory is present in ext then CE feature is on.
+	// If includebrandcategory is present in ext then CE (Competitive Exclusion) feature is on.
 	if requestExt.Prebid.Targeting == nil {
 		return res, seatBids, nil
 	}
 	brandCatExt := requestExt.Prebid.Targeting.IncludeBrandCategory
 
-	//If ext.prebid.targeting.includebrandcategory is present in ext then competitive exclusion feature is on.
+	// If ext.prebid.targeting.includebrandcategory is present in ext then CE feature is on.
 	if brandCatExt == (openrtb_ext.ExtIncludeBrandCategory{}) {
 		return res, seatBids, nil //if not present continue the existing processing without CE.
 	}
@@ -354,6 +469,9 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 	seatBidsToRemove := make([]openrtb_ext.BidderName, 0)
 
 	for bidderName, seatBid := range seatBids {
+		if seatBid == nil {
+			continue
+		}
 		bidsToRemove := make([]int, 0)
 		for bidInd := range seatBid.bids {
 			bid := seatBid.bids[bidInd]
@@ -369,16 +487,16 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 			if category == "" {
 				bidIabCat := bid.bid.Cat
 				if len(bidIabCat) != 1 {
-					//TODO: add metrics
-					//on receiving bids from adapters if no unique IAB category is returned  or if no ad server category is returned discard the bid
+					// TODO: add metrics
+					// on receiving bids from adapters if no unique IAB category is returned  or if no ad server category is returned discard the bid
 					bidsToRemove = append(bidsToRemove, bidInd)
 					continue
 				} else {
-					//if unique IAB category is present then translate it to the adserver category based on mapping file
+					// if unique IAB category is present then translate it to the adserver category based on mapping file
 					category, err = categoriesFetcher.FetchCategories(primaryAdServer, publisher, bidIabCat[0])
 					if err != nil || category == "" {
-						//TODO: add metrics
-						//if mapping required but no mapping file is found then discard the bid
+						// TODO: add metrics
+						// if mapping required but no mapping file is found then discard the bid
 						bidsToRemove = append(bidsToRemove, bidInd)
 						continue
 					}
@@ -386,14 +504,13 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 			}
 
 			// TODO: consider should we remove bids with zero duration here?
-
 			pb, _ = GetCpmStringValue(bid.bid.Price, targData.priceGranularity)
 
 			newDur := duration
 			if len(requestExt.Prebid.Targeting.DurationRangeSec) > 0 {
 				durationRange := requestExt.Prebid.Targeting.DurationRangeSec
 				sort.Ints(durationRange)
-				//if the bid is above the range of the listed durations (and outside the buffer), reject the bid
+				// if the bid is above the range of the listed durations (and outside the buffer), reject the bid
 				if duration > durationRange[len(durationRange)-1] {
 					bidsToRemove = append(bidsToRemove, bidInd)
 					continue
@@ -434,25 +551,26 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 			dedupe[categoryDuration] = bidDedupe{bidderName: bidderName, bidIndex: bidInd, bidID: bid.bid.ID}
 		}
 
-		if len(bidsToRemove) > 0 {
-			sort.Ints(bidsToRemove)
-			if len(bidsToRemove) == len(seatBid.bids) {
-				//if all bids are invalid - remove entire seat bid
-				seatBidsToRemove = append(seatBidsToRemove, bidderName)
-			} else {
-				bids := seatBid.bids
-				for i := len(bidsToRemove) - 1; i >= 0; i-- {
-					remInd := bidsToRemove[i]
-					bids = append(bids[:remInd], bids[remInd+1:]...)
-				}
-				seatBid.bids = bids
-			}
-		}
-
+		seatBid.bids = removeBids(seatBid.bids, bidsToRemove)
 	}
+	return res, removeSeatBids(seatBids, seatBidsToRemove), nil
+}
+
+func removeBids(bids []*pbsOrtbBid, bidsToRemove []int) []*pbsOrtbBid {
+	if len(bidsToRemove) > 0 {
+		sort.Ints(bidsToRemove)
+		for i := len(bidsToRemove) - 1; i >= 0; i-- {
+			remInd := bidsToRemove[i]
+			bids = append(bids[:remInd], bids[remInd+1:]...)
+		}
+	}
+	return bids
+}
+
+func removeSeatBids(seatBids map[openrtb_ext.BidderName]*pbsOrtbSeatBid, seatBidsToRemove []openrtb_ext.BidderName) map[openrtb_ext.BidderName]*pbsOrtbSeatBid {
 	if len(seatBidsToRemove) > 0 {
 		if len(seatBidsToRemove) == len(seatBids) {
-			//delete all seat bids
+			// delete all seat bids
 			seatBids = nil
 		} else {
 			for _, seatBidInd := range seatBidsToRemove {
@@ -461,8 +579,7 @@ func applyCategoryMapping(requestExt openrtb_ext.ExtRequest, seatBids map[openrt
 
 		}
 	}
-
-	return res, seatBids, nil
+	return seatBids
 }
 
 func getPrimaryAdServer(adServerId int) (string, error) {

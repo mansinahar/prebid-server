@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/prebid/prebid-server/stored_requests"
-	"github.com/prebid/prebid-server/stored_requests/backends/file_fetcher"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -16,12 +14,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prebid/prebid-server/stored_requests"
+	"github.com/prebid/prebid-server/stored_requests/backends/file_fetcher"
+
 	"github.com/prebid/prebid-server/adapters"
 	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/prebid_cache_client"
 
 	"github.com/buger/jsonparser"
 	"github.com/mxmCherry/openrtb"
+	native_request "github.com/mxmCherry/openrtb/native/request"
 	"github.com/prebid/prebid-server/config"
 	"github.com/prebid/prebid-server/gdpr"
 	"github.com/prebid/prebid-server/openrtb_ext"
@@ -125,7 +127,7 @@ func TestCharacterEscape(t *testing.T) {
 	var errList []error
 
 	/* 	4) Build bid response 									*/
-	bid_resp, err := e.buildBidResponse(context.Background(), liveAdapters, adapterBids, bidRequest, resolvedRequest, adapterExtra, errList)
+	bidResp, err := e.buildBidResponse(context.Background(), liveAdapters, adapterBids, bidRequest, resolvedRequest, adapterExtra, errList)
 
 	/* 	5) Assert we have no errors and one '&' character as we are supposed to 	*/
 	if err != nil {
@@ -134,8 +136,8 @@ func TestCharacterEscape(t *testing.T) {
 	if len(errList) > 0 {
 		t.Errorf("exchange.buildBidResponse returned %d errors", len(errList))
 	}
-	if bytes.Contains(bid_resp.Ext, []byte("u0026")) {
-		t.Errorf("exchange.buildBidResponse() did not correctly print the '&' characters %s", string(bid_resp.Ext))
+	if bytes.Contains(bidResp.Ext, []byte("u0026")) {
+		t.Errorf("exchange.buildBidResponse() did not correctly print the '&' characters %s", string(bidResp.Ext))
 	}
 }
 
@@ -504,7 +506,7 @@ func newExchangeForTests(t *testing.T, filename string, expectations map[string]
 
 	return &exchange{
 		adapterMap:          adapters,
-		me:                  metricsConf.NewMetricsEngine(&config.Configuration{}, openrtb_ext.BidderList()),
+		metricsEngine:       metricsConf.NewMetricsEngine(&config.Configuration{}, openrtb_ext.BidderList()),
 		cache:               &wellBehavedCache{},
 		cacheTime:           0,
 		gDPR:                gdpr.AlwaysAllow{},
@@ -537,6 +539,327 @@ func newExtRequest() openrtb_ext.ExtRequest {
 		Prebid: openrtb_ext.ExtRequestPrebid{
 			Targeting: &reqExt,
 		},
+	}
+}
+
+func TestValidateNativeBid(t *testing.T) {
+	testCases := []struct {
+		pbsBid      *pbsOrtbBid
+		nativeReq   string
+		description string
+		expectedRes bool
+	}{
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"assets\":[{\"id\": 2,\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 1,\"title\":{\"text\":\"This is an example Prebid Native creative\"}},{\"id\": 3,\"data\":{\"value\":\"Prebid.org\"}},{\"id\": 4,\"data\":{\"value\":\"This is a Prebid Native Creative. There are many like it, but this one is mine.\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Bid contains all required assets and some optional assets",
+			expectedRes: true,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"assets\":[],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":0,\"title\":{\"len\":500}},{\"id\":2,\"required\":0,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Bid contains no assets for a request that has all optional assets",
+			expectedRes: true,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"assets\":[{\"id\": 2,\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 1,\"title\":{\"text\":\"This is an example Prebid Native creative\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}}]}",
+			description: "Bid contains all required assets for a request that has all required assets",
+			expectedRes: true,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					AdM:   "{\"assets\":[],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+					Price: 10.000,
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}}]}",
+			description: "Bid contains no assets for a request that has all required assets",
+			expectedRes: false,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"assets\":[{\"id\": 2,\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 3,\"data\":{\"value\":\"Prebid.org\"}},{\"id\": 4,\"data\":{\"value\":\"This is a Prebid Native Creative. There are many like it, but this one is mine.\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Bid contains some required assets and some optional assets",
+			expectedRes: false,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"ver\":\"1.2\",\"assets\":[{\"id\": 2,\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 3,\"data\":{\"value\":\"Prebid.org\"}},{\"id\": 4,\"data\":{\"value\":\"This is a Prebid Native Creative. There are many like it, but this one is mine.\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Native version mismatch",
+			expectedRes: false,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{\"ver\":\"1.1\",\"assets\":[{\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 3,\"data\":{\"value\":\"Prebid.org\"}},{\"id\": 4,\"data\":{\"value\":\"This is a Prebid Native Creative. There are many like it, but this one is mine.\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Bid asset has a missing asset ID",
+			expectedRes: false,
+		},
+		{
+			pbsBid: &pbsOrtbBid{
+				bid: &openrtb.Bid{
+					ID:    "bid_id1",
+					ImpID: "imp_id1",
+					Price: 10.000,
+					AdM:   "{invalid-json",
+				},
+				bidType: "native",
+			},
+			nativeReq:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+			description: "Bid contains invalid native json",
+			expectedRes: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		// Unmarshal native request
+		var nativeRequest native_request.Request
+		err := json.Unmarshal(json.RawMessage(testCase.nativeReq), &nativeRequest)
+		assert.NoError(t, err, "Unable to marshal native request")
+		assert.Equal(t, testCase.expectedRes, validateNativeBid(testCase.pbsBid, nativeRequest), "validateNativeBid should return %s for case: %s", testCase.expectedRes, testCase.description)
+	}
+}
+
+func TestRemoveInvalidNativeBids(t *testing.T) {
+	// impMixAssets contains some required and some optional assets
+	impMixAssets := openrtb.Imp{
+		ID: "impMixAssets",
+		Native: &openrtb.Native{
+			Ver:     "v1.2",
+			Request: "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}},{\"id\":3,\"required\":0,\"data\":{\"type\":1,\"len\":200}},{\"id\":4,\"required\":0,\"data\":{\"type\":2,\"len\":15000}},{\"id\":5,\"required\":0,\"data\":{\"type\":6,\"len\":40}},{\"id\":6,\"required\":0,\"data\":{\"type\":500}}]}",
+		},
+	}
+
+	// impOptionalAssets contains all optional assets
+	impOptionalAssets := openrtb.Imp{
+		ID: "impOptionalAssets",
+		Native: &openrtb.Native{
+			Ver:     "v1.2",
+			Request: "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":0,\"title\":{\"len\":500}},{\"id\":2,\"required\":0,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}}]}",
+		},
+	}
+
+	// impRequiredAssets contains all required assets
+	impRequiredAssets := openrtb.Imp{
+		ID: "impRequiredAssets",
+		Native: &openrtb.Native{
+			Ver:     "v1.2",
+			Request: "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}}]}",
+		},
+	}
+
+	// impBanner is an imp for a banner ad
+	impBanner := openrtb.Imp{
+		ID: "impBanner",
+		Banner: &openrtb.Banner{
+			Format: []openrtb.Format{{
+				W: 300,
+				H: 250,
+			}, {
+				W: 300,
+				H: 600,
+			}},
+		},
+		Ext: buildImpExt(t, "banner"),
+	}
+
+	// invalidNativeImp is an imp with invalid json encoded native request
+	invalidNativeImp := openrtb.Imp{
+		ID: "invalidNativeImp",
+		Native: &openrtb.Native{
+			Ver:     "v1.2",
+			Request: "invalid-imp}",
+		},
+	}
+
+	// pbsBidAllAssets is a bid that contains all requested assets
+	pbsBidAllAssets := &pbsOrtbBid{
+		bid: &openrtb.Bid{
+			ID:    "pbsBidAllAssets",
+			ImpID: "impRequiredAssets",
+			AdM:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[{\"id\":1,\"required\":1,\"title\":{\"len\":500}},{\"id\":2,\"required\":1,\"img\":{\"type\":3,\"wmin\":1,\"hmin\":1}}]}",
+		},
+		bidType: "native",
+	}
+
+	// pbsBidNoAssets is a bid that contains no assets
+	pbsBidNoAssets := &pbsOrtbBid{
+		bid: &openrtb.Bid{
+			ID:    "bid_id2",
+			ImpID: "impOptionalAssets",
+			AdM:   "{\"ver\":\"1.1\",\"context\":1,\"contextsubtype\":11,\"plcmttype\":4,\"plcmtcnt\":1,\"assets\":[]}",
+		},
+		bidType: "native",
+	}
+
+	// pbsBidMixAssets is a bid that contains all required and optional assets
+	pbsBidMixAssets := &pbsOrtbBid{
+		bid: &openrtb.Bid{
+			ID:    "pbsBidRequiredAssets",
+			ImpID: "impMixAssets",
+			AdM:   "{\"assets\":[{\"id\": 2,\"img\":{\"url\":\"http://some-img.jpg\",\"w\": 3000,\"h\": 2250,\"ext\":{\"appnexus\":{\"prevent_crop\":0}}}},{\"id\": 1,\"title\":{\"text\":\"This is an example Prebid Native creative\"}},{\"id\": 3,\"data\":{\"value\":\"Prebid.org\"}},{\"id\": 4,\"data\":{\"value\":\"This is a Prebid Native Creative. There are many like it, but this one is mine.\"}}],\"link\":{\"url\":\"http://some-link.com\"},\"imptrackers\":[\"http://some-imp-trackers\"],\"jstracker\":\"<script src=\\\"http://www.some-js-tracker.js\\\"></script>\"}",
+		},
+		bidType: "native",
+	}
+
+	testCases := []struct {
+		imps             []openrtb.Imp
+		seatBids         map[openrtb_ext.BidderName]*pbsOrtbSeatBid
+		errRes           bool
+		validSeatBidsLen int
+		validBidsLen     map[openrtb_ext.BidderName]int
+		description      string
+	}{
+		{
+			imps: []openrtb.Imp{impMixAssets, impRequiredAssets, impOptionalAssets, impBanner},
+			seatBids: map[openrtb_ext.BidderName]*pbsOrtbSeatBid{
+				openrtb_ext.BidderAppnexus: {
+					bids: []*pbsOrtbBid{pbsBidAllAssets, pbsBidMixAssets, pbsBidNoAssets},
+				},
+				openrtb_ext.BidderAdform: {
+					bids: []*pbsOrtbBid{
+						{
+							bid: &openrtb.Bid{
+								ID:    "someBidID",
+								ImpID: "impRequiredAssets",
+								AdM:   pbsBidNoAssets.bid.AdM,
+							},
+							bidType: "native",
+						},
+						pbsBidNoAssets,
+					},
+				},
+				openrtb_ext.BidderRubicon: {
+					bids: []*pbsOrtbBid{
+						{
+							bid: &openrtb.Bid{
+								ID:    "someBidID",
+								ImpID: "impRequiredAssets",
+								AdM:   pbsBidNoAssets.bid.AdM,
+							},
+							bidType: "native",
+						},
+					},
+				},
+				openrtb_ext.Bidder33Across: nil,
+			},
+			errRes:           false,
+			validSeatBidsLen: 2,
+			validBidsLen: map[openrtb_ext.BidderName]int{
+				openrtb_ext.BidderAppnexus: 3,
+				openrtb_ext.BidderAdform:   1,
+			},
+			description: "mix valid and invalid bids",
+		},
+		{
+			imps: []openrtb.Imp{invalidNativeImp},
+			seatBids: map[openrtb_ext.BidderName]*pbsOrtbSeatBid{
+				openrtb_ext.BidderAppnexus: {
+					bids: []*pbsOrtbBid{
+						{
+							bid: &openrtb.Bid{
+								ID:    "someBidID",
+								ImpID: "invalidNativeImp",
+								AdM:   pbsBidNoAssets.bid.AdM,
+							},
+							bidType: "native",
+						},
+					},
+				},
+			},
+			errRes:           true,
+			validSeatBidsLen: 1,
+			validBidsLen: map[openrtb_ext.BidderName]int{
+				openrtb_ext.BidderAppnexus: 1,
+			},
+			description: "invalid json encoded native request in imp",
+		},
+		{
+			imps: []openrtb.Imp{impMixAssets},
+			seatBids: map[openrtb_ext.BidderName]*pbsOrtbSeatBid{
+				openrtb_ext.BidderAppnexus: {
+					bids: []*pbsOrtbBid{
+						{
+							bid: &openrtb.Bid{
+								ID:    "someBidID",
+								ImpID: "impMixAssets",
+								AdM:   "invalid-bid}",
+							},
+							bidType: "native",
+						},
+					},
+				},
+			},
+			errRes:           false,
+			validSeatBidsLen: 0,
+			validBidsLen:     map[openrtb_ext.BidderName]int{},
+			description:      "invalid adM in bid",
+		},
+	}
+
+	for _, testCase := range testCases {
+		validSeatBids, err := removeInvalidNativeBids(testCase.imps, testCase.seatBids)
+		if testCase.errRes {
+			assert.Error(t, err, "removeInvalidNativeBids should return an error for case: %s", testCase.description)
+		} else {
+			assert.NoError(t, err, "removeInvalidNativeBids should return no error for case: %s", testCase.description)
+		}
+		assert.Len(t, validSeatBids, testCase.validSeatBidsLen, "removeInvalidNativeBids should contain %d seat bids for case: %s", testCase.validSeatBidsLen, testCase.description)
+		for bidder, seatBid := range validSeatBids {
+			assert.Len(t, seatBid.bids, testCase.validBidsLen[bidder], "removeInvalidNativeBids should contain %s valid bids for bidder %s", testCase.validBidsLen[bidder], string(bidder), testCase.description)
+		}
 	}
 }
 

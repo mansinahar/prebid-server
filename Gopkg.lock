@@ -215,12 +215,13 @@
   version = "v0.4.1"
 
 [[projects]]
-  digest = "1:46119a7cf1745644cc6871b4d037e6ad453001fe74b067b7e50c43058af05fc9"
+  digest = "1:336a33b1b472aa8ef880b5428996ee8038832f49bbed711db0d0b176bccf1e92"
   name = "github.com/mxmCherry/openrtb"
   packages = [
     ".",
     "native",
     "native/request",
+    "native/response",
   ]
   pruneopts = "UT"
   revision = "39d0e974b2f73eedac8ea9799c6625df7735a47d"
@@ -511,6 +512,7 @@
     "github.com/mxmCherry/openrtb",
     "github.com/mxmCherry/openrtb/native",
     "github.com/mxmCherry/openrtb/native/request",
+    "github.com/mxmCherry/openrtb/native/response",
     "github.com/prebid/go-gdpr/consentconstants",
     "github.com/prebid/go-gdpr/vendorconsent",
     "github.com/prebid/go-gdpr/vendorlist",

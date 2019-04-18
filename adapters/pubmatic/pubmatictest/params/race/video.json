@@ -1,10 +1,15 @@
 {
 	"publisherId": "156209",
 	"adSlot": "pubmatic_test2@300x250",
-	"keywords": {
-		"pmZoneID": "Zone1,Zone2",
-		"preference": "sports,movies"
-	},
+	"keywords": [{
+		"key": "pmZoneID",
+		"value": ["Zone1", "Zone2"]
+	  },
+	  {
+		 "key": "preference",
+		 "value": ["sports", "movies"]
+	  }
+	],
 	"wrapper": {
 		"version": 2,
 		"profile": 595

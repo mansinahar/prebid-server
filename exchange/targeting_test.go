@@ -72,7 +72,7 @@ func runTargetingAuction(t *testing.T, mockBids map[openrtb_ext.BidderName][]*op
 
 	ex := &exchange{
 		adapterMap:          buildAdapterMap(mockBids, server.URL, server.Client()),
-		me:                  &metricsConf.DummyMetricsEngine{},
+		metricsEngine:       &metricsConf.DummyMetricsEngine{},
 		cache:               &wellBehavedCache{},
 		cacheTime:           time.Duration(0),
 		gDPR:                gdpr.AlwaysAllow{},
