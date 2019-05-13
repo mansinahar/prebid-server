@@ -1,9 +1,10 @@
 package usersyncers
 
 import (
-	"github.com/prebid/prebid-server/adapters/gamoshi"
 	"strings"
 	"text/template"
+
+	"github.com/prebid/prebid-server/adapters/gamoshi"
 
 	"github.com/golang/glog"
 	ttx "github.com/prebid/prebid-server/adapters/33across"
@@ -72,7 +73,7 @@ func NewSyncerMap(cfg *config.Configuration) map[openrtb_ext.BidderName]usersync
 	return syncers
 }
 
-func insertIntoMap(cfg *config.Configuration, syncers map[openrtb_ext.BidderName]usersync.Usersyncer, bidder openrtb_ext.BidderName, syncerFactory func(temp *template.Template) usersync.Usersyncer) {
+func insertIntoMap(cfg *config.Configuration, syncers map[openrtb_ext.BidderName]usersync.Usersyncer, bidder openrtb_ext.BidderName, syncerFactory func(*template.Template) usersync.Usersyncer) {
 	lowercased := strings.ToLower(string(bidder))
 	urlString := cfg.Adapters[lowercased].UserSyncURL
 	if urlString == "" {
