@@ -144,9 +144,11 @@ func NewBlankMetrics(registry metrics.Registry, exchanges []openrtb_ext.BidderNa
 // metrics object to contain only the metrics we are interested in. This would allow for debug
 // mode metrics. The code would allways try to record the metrics, but effectively noop if we are
 // using a blank meter/timer.
-func NewMetrics(registry metrics.Registry, exchanges []openrtb_ext.BidderName) *Metrics {
+func NewMetrics(registry metrics.Registry, exchanges []openrtb_ext.BidderName, disabledMetrics map[string]bool) *Metrics {
 	newMetrics := NewBlankMetrics(registry, exchanges)
-	newMetrics.ConnectionCounter = metrics.GetOrRegisterCounter("active_connections", registry)
+	if !disabledMetrics["active_connections"] {
+		newMetrics.ConnectionCounter = metrics.GetOrRegisterCounter("active_connections", registry)
+	}
 	newMetrics.ConnectionAcceptErrorMeter = metrics.GetOrRegisterMeter("connection_accept_errors", registry)
 	newMetrics.ConnectionCloseErrorMeter = metrics.GetOrRegisterMeter("connection_close_errors", registry)
 	newMetrics.ImpMeter = metrics.GetOrRegisterMeter("imps_requested", registry)

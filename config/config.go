@@ -48,6 +48,8 @@ type Configuration struct {
 	GDPR                 GDPR               `mapstructure:"gdpr"`
 	CurrencyConverter    CurrencyConverter  `mapstructure:"currency_converter"`
 	DefReqConfig         DefReqConfig       `mapstructure:"default_request"`
+	DisabledMetrics      []string           `mapstructure:"non_standard_publishers,flow"`
+	DisabledMetricsMap   map[string]bool
 
 	VideoStoredRequestRequired bool `mapstructure:"video_stored_request_required"`
 
@@ -397,6 +399,12 @@ func New(v *viper.Viper) (*Configuration, error) {
 	c.GDPR.NonStandardPublisherMap = make(map[string]int)
 	for i := 0; i < len(c.GDPR.NonStandardPublishers); i++ {
 		c.GDPR.NonStandardPublisherMap[c.GDPR.NonStandardPublishers[i]] = 1
+	}
+
+	c.DisabledMetricsMap = make(map[string]bool)
+		for _, metric := range c.DisabledMetrics {
+			c.DisabledMetricsMap[metric] = true
+		}
 	}
 
 	// To look for a request's app_id in O(1) time, we fill this hash table located in the
