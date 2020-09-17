@@ -16,47 +16,49 @@ import (
 )
 
 // Adapter is a struct defining the Openrtb Generic Adapter
-type adapter struct {
+type Adapter struct {
 	EndpointTemplate template.Template
 }
 
 // NewAdapter creates a new instance of the GenericAdapter
-func NewAdapter(endpoint string) *GenericAdapter {
+func NewAdapter(endpoint string) *Adapter {
 	template, err := template.New("endpointTemplate").Parse(endpoint)
 	if err != nil {
 		glog.Fatal("Unable to parse endpoint url template")
 		return nil
 	}
 
-	return &OpenrtbGenericAdapter{EndpointTemplate: *template}
+	return &Adapter{EndpointTemplate: *template}
 }
 
 // MakeRequests converts the incoming request into requests for the Generic Adapter
-func (a *GenericAdapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
+func (a *Adapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
+	var err error
 	errs := make([]error, 0, len(request.Imp))
 	headers := http.Header{
 		"Content-Type": {"application/json"},
 		"Accept":       {"application/json"},
 	}
 
-	if len(request.Imp) < 0 {
+	if len(request.Imp) <= 0 {
 		return nil, []error{errors.New("No imps present in request")}
 	}
 
-	if bidderParams, err := getBidderParams(request.Imp[0]); err != nil {
-		return nil, []error{errors.New("Unable to parse bidder ext ", err)}
+	var bidderParams openrtb_ext.ExtImpGeneric
+	if bidderParams, err = getBidderParams(&request.Imp[0]); err != nil {
+		return nil, []error{errors.New("Unable to parse bidder ext. " + err.Error())}
 	}
 
 	requestJSON, err := json.Marshal(request)
 	if err != nil {
-		return nil, []error{errors.New("Unable to JSON marshal the request ", err)}
+		return nil, []error{errors.New("Unable to JSON marshal the request. " + err.Error())}
 	}
 
 	urlParams := macros.EndpointTemplateParams{Host: bidderParams.Host}
 	url, err := macros.ResolveMacros(a.EndpointTemplate, urlParams)
 
 	if err != nil {
-		return nil, []error{errors.New("Unable to contruct the URL using the provided host ", err)}
+		return nil, []error{errors.New("Unable to contruct the URL using the provided host. " + err.Error())}
 	}
 
 	adapterRequests := []*adapters.RequestData{{
@@ -93,7 +95,7 @@ func getBidderParams(imp *openrtb.Imp) (openrtb_ext.ExtImpGeneric, error) {
 }
 
 // MakeBids converts the bids from the Geeric Adapter to the prebid server specific bids
-func (a *GenericAdapter) MakeBids(internalRequest *openrtb.BidRequest, externalRequest *adapters.RequestData, response *adapters.ResponseData) (*adapters.BidderResponse, []error) {
+func (a *Adapter) MakeBids(internalRequest *openrtb.BidRequest, externalRequest *adapters.RequestData, response *adapters.ResponseData) (*adapters.BidderResponse, []error) {
 	var errs []error
 
 	if response.StatusCode == http.StatusNoContent {
