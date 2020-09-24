@@ -1,12 +1,12 @@
 maintainer:
-    email: "mansi.nahar@xandr.com"
-  capabilities:
-    app:
-      mediaTypes:
-        - banner
-        - video
-    site:
-      mediaTypes:
-        - banner
-        - video
-  
+  email: "mansi.nahar@xandr.com"
+capabilities:
+  app:
+    mediaTypes:
+      - banner
+      - video
+  site:
+    mediaTypes:
+      - banner
+      - video
+
