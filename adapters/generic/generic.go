@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"text/template"
 
 	"github.com/golang/glog"
@@ -35,6 +36,7 @@ func NewAdapter(endpoint string) *Adapter {
 func (a *Adapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
 	var err error
 	errs := make([]error, 0, len(request.Imp))
+	adapterRequests := make([]*adapters.RequestData, 0, len(request.Imp))
 	headers := http.Header{
 		"Content-Type": {"application/json"},
 		"Accept":       {"application/json"},
@@ -45,28 +47,33 @@ func (a *Adapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.Ex
 	}
 
 	var bidderParams openrtb_ext.ExtImpGeneric
-	if bidderParams, err = getBidderParams(&request.Imp[0]); err != nil {
-		return nil, []error{errors.New("Unable to parse bidder ext. " + err.Error())}
+
+	for _, imp := range request.Imp {
+		if bidderParams, err = getBidderParams(&imp); err != nil {
+			return nil, []error{errors.New("Unable to parse bidder ext. " + err.Error())}
+		}
+
+		urlParams := macros.EndpointTemplateParams{Host: bidderParams.Host}
+		url, err := macros.ResolveMacros(a.EndpointTemplate, urlParams)
+		if err != nil {
+			return nil, []error{errors.New("Unable to contruct the URL using the provided host. " + err.Error())}
+		}
+		url = strings.TrimSuffix(url, "/")
+
+		reqCopy := *request
+		reqCopy.Imp = []openrtb.Imp{imp}
+		requestJSON, err := json.Marshal(reqCopy)
+		if err != nil {
+			return nil, []error{errors.New("Unable to JSON marshal the request. " + err.Error())}
+		}
+
+		adapterRequests = append(adapterRequests, &adapters.RequestData{
+			Method:  "POST",
+			Uri:     url + "/" + imp.ID,
+			Body:    requestJSON,
+			Headers: headers,
+		})
 	}
-
-	requestJSON, err := json.Marshal(request)
-	if err != nil {
-		return nil, []error{errors.New("Unable to JSON marshal the request. " + err.Error())}
-	}
-
-	urlParams := macros.EndpointTemplateParams{Host: bidderParams.Host}
-	url, err := macros.ResolveMacros(a.EndpointTemplate, urlParams)
-
-	if err != nil {
-		return nil, []error{errors.New("Unable to contruct the URL using the provided host. " + err.Error())}
-	}
-
-	adapterRequests := []*adapters.RequestData{{
-		Method:  "POST",
-		Uri:     url,
-		Body:    requestJSON,
-		Headers: headers,
-	}}
 	return adapterRequests, errs
 }
 
