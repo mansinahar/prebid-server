@@ -27,7 +27,7 @@
     "httpCalls": [
       {
         "expectedRequest": {
-          "uri": "http://localhost:5000/s2s/",
+          "uri": "http://localhost:5000/s2s/test-imp-banner-id",
           "body": {
             "id": "test-banner-request-id",
             "imp": [

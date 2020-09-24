@@ -23,7 +23,7 @@
   "httpCalls": [
     {
       "expectedRequest": {
-        "uri": "http://localhost:5000/s2s/",
+        "uri": "http://localhost:5000/s2s/test-imp-id",
         "body": {
           "id": "test-request-id",
           "imp": [
