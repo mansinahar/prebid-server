@@ -69,7 +69,7 @@ func (a *Adapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.Ex
 
 		adapterRequests = append(adapterRequests, &adapters.RequestData{
 			Method:  "POST",
-			Uri:     url + "/" + imp.ID,
+			Uri:     url + "/?impID=" + imp.ID,
 			Body:    requestJSON,
 			Headers: headers,
 		})
