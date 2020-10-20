@@ -21,7 +21,7 @@
     "httpCalls": [
       {
         "expectedRequest": {
-          "uri": "http://localhost:5000/s2s/test-imp-video-id",
+          "uri": "http://localhost:5000/s2s/?impID=test-imp-video-id",
           "body": {
             "id": "test-video-request-id",
             "imp": [
