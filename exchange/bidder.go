@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/http/httptrace"
 	"time"
@@ -448,21 +449,25 @@ func (bidder *bidderAdapter) addClientTrace(ctx context.Context) context.Context
 	trace := &httptrace.ClientTrace{
 		// GetConn is called before a connection is created or retrieved from an idle pool
 		GetConn: func(hostPort string) {
+			log.Printf("Getting connection to: %s for bidder: %s", hostPort, bidder.BidderName)
 			connStart = time.Now()
 		},
 		// GotConn is called after a successful connection is obtained
 		GotConn: func(info httptrace.GotConnInfo) {
+			log.Printf("Got connection for bidder: %s", bidder.BidderName)
 			connWaitTime := time.Now().Sub(connStart)
 
 			bidder.me.RecordAdapterConnections(bidder.BidderName, info.Reused, connWaitTime)
 		},
 		// DNSStart is called when a DNS lookup begins.
 		DNSStart: func(info httptrace.DNSStartInfo) {
+			log.Printf("Starting DNS lookup for bidder: %s at: %v", bidder.BidderName, time.Now())
 			dnsStart = time.Now()
 		},
 		// DNSDone is called when a DNS lookup ends.
 		DNSDone: func(info httptrace.DNSDoneInfo) {
 			dnsLookupTime := time.Now().Sub(dnsStart)
+			log.Println("DNS lookup done for bidder: %s at: %v", bidder.BidderName, time.Now())
 
 			bidder.me.RecordDNSTime(dnsLookupTime)
 		},
