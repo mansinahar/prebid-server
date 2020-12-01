@@ -1,17 +1,13 @@
 package exchange
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 
-	"github.com/prebid/go-gdpr/vendorconsent"
-
 	"github.com/buger/jsonparser"
 	"github.com/mxmCherry/openrtb"
 	"github.com/prebid/prebid-server/config"
-	"github.com/prebid/prebid-server/gdpr"
 	"github.com/prebid/prebid-server/openrtb_ext"
 	"github.com/prebid/prebid-server/pbsmetrics"
 	"github.com/prebid/prebid-server/privacy"
@@ -45,90 +41,6 @@ func BidderToPrebidSChains(req *openrtb_ext.ExtRequest) (map[string]*openrtb_ext
 	}
 
 	return bidderToSChains, nil
-}
-
-// cleanOpenRTBRequests splits the input request into requests which are sanitized for each bidder. Intended behavior is:
-//
-//   1. BidRequest.Imp[].Ext will only contain the "prebid" field and a "bidder" field which has the params for the intended Bidder.
-//   2. Every BidRequest.Imp[] requested Bids from the Bidder who keys it.
-//   3. BidRequest.User.BuyerUID will be set to that Bidder's ID.
-func cleanOpenRTBRequests(ctx context.Context,
-	req AuctionRequest,
-	requestExt *openrtb_ext.ExtRequest,
-	gDPR gdpr.Permissions,
-	usersyncIfAmbiguous bool,
-	privacyConfig config.Privacy) (bidderRequests []BidderRequest, privacyLabels pbsmetrics.PrivacyLabels, errs []error) {
-
-	impsByBidder, errs := splitImps(req.BidRequest.Imp)
-	if len(errs) > 0 {
-		return
-	}
-
-	aliases, errs := parseAliases(req.BidRequest)
-	if len(errs) > 0 {
-		return
-	}
-
-	bidderRequests, errs = getAuctionBidderRequests(req, requestExt, impsByBidder, aliases)
-
-	if len(bidderRequests) == 0 {
-		return
-	}
-
-	gdpr := extractGDPR(req.BidRequest, usersyncIfAmbiguous)
-	consent := extractConsent(req.BidRequest)
-	ampGDPRException := (req.LegacyLabels.RType == pbsmetrics.ReqTypeAMP) && gDPR.AMPException()
-
-	ccpaEnforcer, err := extractCCPA(req.BidRequest, privacyConfig, &req.Account, aliases, integrationTypeMap[req.LegacyLabels.RType])
-	if err != nil {
-		errs = append(errs, err)
-		return
-	}
-
-	lmtEnforcer := extractLMT(req.BidRequest, privacyConfig)
-
-	// request level privacy policies
-	privacyEnforcement := privacy.Enforcement{
-		COPPA: req.BidRequest.Regs != nil && req.BidRequest.Regs.COPPA == 1,
-		LMT:   lmtEnforcer.ShouldEnforce(unknownBidder),
-	}
-
-	privacyLabels.CCPAProvided = ccpaEnforcer.CanEnforce()
-	privacyLabels.CCPAEnforced = ccpaEnforcer.ShouldEnforce(unknownBidder)
-	privacyLabels.COPPAEnforced = privacyEnforcement.COPPA
-	privacyLabels.LMTEnforced = lmtEnforcer.ShouldEnforce(unknownBidder)
-
-	gdprEnabled := gdprEnabled(&req.Account, privacyConfig, integrationTypeMap[req.LegacyLabels.RType])
-
-	if gdpr == 1 && gdprEnabled {
-		privacyLabels.GDPREnforced = true
-		parsedConsent, err := vendorconsent.ParseString(consent)
-		if err == nil {
-			version := int(parsedConsent.Version())
-			privacyLabels.GDPRTCFVersion = pbsmetrics.TCFVersionToValue(version)
-		}
-	}
-
-	// bidder level privacy policies
-	for _, bidderRequest := range bidderRequests {
-		// CCPA
-		privacyEnforcement.CCPA = ccpaEnforcer.ShouldEnforce(bidderRequest.BidderName.String())
-
-		// GDPR
-		if gdpr == 1 && gdprEnabled {
-			var publisherID = req.LegacyLabels.PubID
-			_, geo, id, err := gDPR.PersonalInfoAllowed(ctx, bidderRequest.BidderCoreName, publisherID, consent)
-			privacyEnforcement.GDPRGeo = !geo && err == nil
-			privacyEnforcement.GDPRID = !id && err == nil
-		} else {
-			privacyEnforcement.GDPRGeo = false
-			privacyEnforcement.GDPRID = false
-		}
-
-		privacyEnforcement.Apply(bidderRequest.BidRequest, ampGDPRException)
-	}
-
-	return
 }
 
 func gdprEnabled(account *config.Account, privacyConfig config.Privacy, integrationType config.IntegrationType) bool {
@@ -171,12 +83,14 @@ func extractLMT(orig *openrtb.BidRequest, privacyConfig config.Privacy) privacy.
 	}
 }
 
-func getAuctionBidderRequests(req AuctionRequest,
-	requestExt *openrtb_ext.ExtRequest,
-	impsByBidder map[string][]openrtb.Imp,
-	aliases map[string]string) ([]BidderRequest, []error) {
+func getAuctionBidders(req AuctionRequest) (bidderRequests []BidderRequest, errs []error) {
 
-	bidderRequests := make([]BidderRequest, 0, len(impsByBidder))
+	impsByBidder, errs := splitImps(req.BidRequest.Imp)
+	if len(errs) > 0 {
+		return
+	}
+
+	bidderRequests = make([]BidderRequest, 0, len(impsByBidder))
 
 	explicitBuyerUIDs, err := extractBuyerUIDs(req.BidRequest.User)
 	if err != nil {
@@ -185,18 +99,18 @@ func getAuctionBidderRequests(req AuctionRequest,
 
 	var sChainsByBidder map[string]*openrtb_ext.ExtRequestPrebidSChainSChain
 
-	sChainsByBidder, err = BidderToPrebidSChains(requestExt)
+	sChainsByBidder, err = BidderToPrebidSChains(req.RequestExt)
 	if err != nil {
 		return nil, []error{err}
 	}
 
-	reqExt, err := getExtJson(req.BidRequest, requestExt)
+	reqExt, err := getExtJson(req.BidRequest, req.RequestExt)
 	if err != nil {
 		return nil, []error{err}
 	}
 
 	for bidder, imps := range impsByBidder {
-		coreBidder := resolveBidder(bidder, aliases)
+		coreBidder := resolveBidder(bidder, req.Aliases)
 
 		reqCopy := *req.BidRequest
 		reqCopy.Imp = imps
@@ -469,14 +383,14 @@ func parseImpExts(imps []openrtb.Imp) ([]map[string]json.RawMessage, error) {
 }
 
 // parseAliases parses the aliases from the BidRequest
-func parseAliases(orig *openrtb.BidRequest) (map[string]string, []error) {
+func parseAliases(orig *openrtb.BidRequest) (map[string]string, error) {
 	var aliases map[string]string
 	if value, dataType, _, err := jsonparser.Get(orig.Ext, openrtb_ext.PrebidExtKey, "aliases"); dataType == jsonparser.Object && err == nil {
 		if err := json.Unmarshal(value, &aliases); err != nil {
-			return nil, []error{err}
+			return nil, err
 		}
 	} else if dataType != jsonparser.NotExist && err != jsonparser.KeyPathNotFoundError {
-		return nil, []error{err}
+		return nil, err
 	}
 	return aliases, nil
 }

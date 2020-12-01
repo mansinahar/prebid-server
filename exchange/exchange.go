@@ -15,6 +15,8 @@ import (
 	"time"
 
 	uuid "github.com/gofrs/uuid"
+	"github.com/prebid/go-gdpr/vendorconsent"
+	"github.com/prebid/prebid-server/privacy"
 	"github.com/prebid/prebid-server/stored_requests"
 
 	"github.com/golang/glog"
@@ -103,6 +105,8 @@ type AuctionRequest struct {
 	UserSyncs   IdFetcher
 	RequestType pbsmetrics.RequestType
 	StartTime   time.Time
+	Aliases     map[string]string
+	RequestExt  *openrtb_ext.ExtRequest
 
 	// LegacyLabels is included here for temporary compatability with cleanOpenRTBRequests
 	// in HoldAuction until we get to factoring it away. Do not use for anything new.
@@ -120,33 +124,41 @@ type BidderRequest struct {
 
 func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *DebugLog) (*openrtb.BidResponse, error) {
 	var err error
-	requestExt, err := extractBidRequestExt(r.BidRequest)
+	r.RequestExt, err = extractBidRequestExt(r.BidRequest)
 	if err != nil {
 		return nil, err
 	}
 
-	cacheInstructions := getExtCacheInstructions(requestExt)
-	targData := getExtTargetData(requestExt, &cacheInstructions)
+	cacheInstructions := getExtCacheInstructions(r.RequestExt)
+	targData := getExtTargetData(r.RequestExt, &cacheInstructions)
 	if targData != nil {
 		_, targData.cacheHost, targData.cachePath = e.cache.GetExtCacheData()
 	}
 
-	debugInfo := getDebugInfo(r.BidRequest, requestExt)
+	debugInfo := getDebugInfo(r.BidRequest, r.RequestExt)
 	if debugInfo {
 		ctx = e.makeDebugContext(ctx, debugInfo)
 	}
 
-	bidAdjustmentFactors := getExtBidAdjustmentFactors(requestExt)
+	bidAdjustmentFactors := getExtBidAdjustmentFactors(r.RequestExt)
 
 	recordImpMetrics(r.BidRequest, e.me)
 
 	// Make our best guess if GDPR applies
 	usersyncIfAmbiguous := e.parseUsersyncIfAmbiguous(r.BidRequest)
 
-	// Slice of BidRequests, each a copy of the original cleaned to only contain bidder data for the named bidder
-	bidderRequests, privacyLabels, errs := cleanOpenRTBRequests(ctx, r, requestExt, e.gDPR, usersyncIfAmbiguous, e.privacyConfig)
+	r.Aliases, err = parseAliases(r.BidRequest)
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing aliases in the request: ", err)
+	}
 
-	e.me.RecordRequestPrivacy(privacyLabels)
+	// Split Bid Request into Bidder specific requests
+	bidderRequests, errs := getAuctionBidders(r)
+	if len(bidderRequests) == 0 {
+		return nil, errors.New("No valid bidders in request")
+	}
+
+	_ = e.enforcePrivacy(ctx, r, bidderRequests, usersyncIfAmbiguous)
 
 	// List of bidders we have requests for.
 	liveAdapters := listBiddersWithRequests(bidderRequests)
@@ -167,9 +179,9 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 
 		var bidCategory map[string]string
 		//If includebrandcategory is present in ext then CE feature is on.
-		if requestExt.Prebid.Targeting != nil && requestExt.Prebid.Targeting.IncludeBrandCategory != nil {
+		if r.RequestExt.Prebid.Targeting != nil && r.RequestExt.Prebid.Targeting.IncludeBrandCategory != nil {
 			var rejections []string
-			bidCategory, adapterBids, rejections, err = applyCategoryMapping(ctx, requestExt, adapterBids, e.categoriesFetcher, targData)
+			bidCategory, adapterBids, rejections, err = applyCategoryMapping(ctx, r.RequestExt, adapterBids, e.categoriesFetcher, targData)
 			if err != nil {
 				return nil, fmt.Errorf("Error in category mapping : %s", err.Error())
 			}
@@ -183,7 +195,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 			auc = newAuction(adapterBids, len(r.BidRequest.Imp), targData.preferDeals)
 			auc.setRoundedPrices(targData.priceGranularity)
 
-			if requestExt.Prebid.SupportDeals {
+			if r.RequestExt.Prebid.SupportDeals {
 				dealErrs := applyDealSupport(r.BidRequest, auc, bidCategory)
 				errs = append(errs, dealErrs...)
 			}
@@ -223,6 +235,72 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 
 	// Build the response
 	return e.buildBidResponse(ctx, liveAdapters, adapterBids, r.BidRequest, adapterExtra, auc, bidResponseExt, cacheInstructions.returnCreative, errs)
+}
+
+func (e *exchange) enforcePrivacy(ctx context.Context,
+	req AuctionRequest,
+	bidderRequests []BidderRequest,
+	usersyncIfAmbiguous bool) (errs []error) {
+
+	gdpr := extractGDPR(req.BidRequest, usersyncIfAmbiguous)
+	consent := extractConsent(req.BidRequest)
+	ampGDPRException := (req.LegacyLabels.RType == pbsmetrics.ReqTypeAMP) && e.gDPR.AMPException()
+
+	ccpaEnforcer, err := extractCCPA(req.BidRequest, e.privacyConfig, &req.Account, req.Aliases, integrationTypeMap[req.LegacyLabels.RType])
+	if err != nil {
+		errs = append(errs, err)
+		return
+	}
+
+	lmtEnforcer := extractLMT(req.BidRequest, e.privacyConfig)
+
+	// request level privacy policies
+	privacyEnforcement := privacy.Enforcement{
+		COPPA: req.BidRequest.Regs != nil && req.BidRequest.Regs.COPPA == 1,
+		LMT:   lmtEnforcer.ShouldEnforce(unknownBidder),
+	}
+
+	privacyLabels := pbsmetrics.PrivacyLabels{
+		CCPAProvided:  ccpaEnforcer.CanEnforce(),
+		CCPAEnforced:  ccpaEnforcer.ShouldEnforce(unknownBidder),
+		COPPAEnforced: privacyEnforcement.COPPA,
+		LMTEnforced:   lmtEnforcer.ShouldEnforce(unknownBidder),
+	}
+
+	gdprEnabled := gdprEnabled(&req.Account, e.privacyConfig, integrationTypeMap[req.LegacyLabels.RType])
+
+	if gdpr == 1 && gdprEnabled {
+		privacyLabels.GDPREnforced = true
+		parsedConsent, err := vendorconsent.ParseString(consent)
+		if err == nil {
+			version := int(parsedConsent.Version())
+			privacyLabels.GDPRTCFVersion = pbsmetrics.TCFVersionToValue(version)
+		}
+	}
+
+	e.me.RecordRequestPrivacy(privacyLabels)
+
+	// bidder level privacy policies
+	for _, bidder := range bidderRequests {
+		// CCPA
+		privacyEnforcement.CCPA = ccpaEnforcer.ShouldEnforce(bidder.BidderName.String())
+
+		// GDPR
+		if gdpr == 1 && gdprEnabled {
+			var publisherID = req.LegacyLabels.PubID
+			// TODO (mnahar): Handle error
+			_, geo, id, err := e.gDPR.PersonalInfoAllowed(ctx, bidder.BidderCoreName, publisherID, consent)
+			privacyEnforcement.GDPRGeo = !geo && err == nil
+			privacyEnforcement.GDPRID = !id && err == nil
+		} else {
+			privacyEnforcement.GDPRGeo = false
+			privacyEnforcement.GDPRID = false
+		}
+
+		privacyEnforcement.Apply(bidder.BidRequest, ampGDPRException)
+	}
+
+	return
 }
 
 func (e *exchange) parseUsersyncIfAmbiguous(bidRequest *openrtb.BidRequest) bool {
