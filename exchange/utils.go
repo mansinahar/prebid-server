@@ -84,7 +84,6 @@ func extractLMT(orig *openrtb.BidRequest, privacyConfig config.Privacy) privacy.
 }
 
 func getAuctionBidderRequests(req AuctionRequest) (bidderRequests []BidderRequest, errs []error) {
-
 	impsByBidder, errs := splitImps(req.BidRequest.Imp)
 	if len(errs) > 0 {
 		return

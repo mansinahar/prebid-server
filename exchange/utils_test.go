@@ -886,55 +886,67 @@ func TestGetExtTargetData(t *testing.T) {
 }
 
 func TestGetDebugInfo(t *testing.T) {
-	type inTest struct {
-		bidRequest *openrtb.BidRequest
-		requestExt *openrtb_ext.ExtRequest
-	}
 	testCases := []struct {
-		desc string
-		in   inTest
-		out  bool
+		desc              string
+		req               AuctionRequest
+		expectedDebugInfo bool
 	}{
 		{
-			desc: "Nil bid request, nil requestExt",
-			in:   inTest{nil, nil},
-			out:  false,
+			desc:              "Nil bid request, nil requestExt",
+			req:               AuctionRequest{},
+			expectedDebugInfo: false,
 		},
 		{
 			desc: "bid request test == 0, nil requestExt",
-			in:   inTest{&openrtb.BidRequest{Test: 0}, nil},
-			out:  false,
+			req: AuctionRequest{
+				BidRequest: &openrtb.BidRequest{Test: 0},
+			},
+			expectedDebugInfo: false,
 		},
 		{
 			desc: "Nil bid request, requestExt debug flag false",
-			in:   inTest{nil, &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}}},
-			out:  false,
+			req: AuctionRequest{
+				Ext: &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}},
+			},
+			expectedDebugInfo: false,
 		},
 		{
 			desc: "bid request test == 0, requestExt debug flag false",
-			in:   inTest{&openrtb.BidRequest{Test: 0}, &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}}},
-			out:  false,
+			req: AuctionRequest{
+				BidRequest: &openrtb.BidRequest{Test: 0},
+				Ext:        &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}},
+			},
+			expectedDebugInfo: false,
 		},
 		{
 			desc: "bid request test == 1, requestExt debug flag false",
-			in:   inTest{&openrtb.BidRequest{Test: 1}, &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}}},
-			out:  true,
+			req: AuctionRequest{
+				BidRequest: &openrtb.BidRequest{Test: 1},
+				Ext:        &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: false}},
+			},
+			expectedDebugInfo: true,
 		},
 		{
 			desc: "bid request test == 0, requestExt debug flag true",
-			in:   inTest{&openrtb.BidRequest{Test: 0}, &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: true}}},
-			out:  true,
+			req: AuctionRequest{
+				BidRequest: &openrtb.BidRequest{Test: 0},
+				Ext:        &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: true}},
+			},
+			expectedDebugInfo: true,
 		},
 		{
 			desc: "bid request test == 1, requestExt debug flag true",
-			in:   inTest{&openrtb.BidRequest{Test: 1}, &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: true}}},
-			out:  true,
+			req: AuctionRequest{
+				BidRequest: &openrtb.BidRequest{Test: 1},
+				Ext:        &openrtb_ext.ExtRequest{Prebid: openrtb_ext.ExtRequestPrebid{Debug: true}},
+			},
+			expectedDebugInfo: true,
 		},
 	}
 	for _, test := range testCases {
-		actualDebugInfo := getDebugInfo(test.in.bidRequest, test.in.requestExt)
+		actualDebugInfo := getDebugInfo(test.req)
 
-		assert.Equal(t, test.out, actualDebugInfo, "%s. Unexpected debug value. \n", test.desc)
+		assert.Equal(t, test.expectedDebugInfo, actualDebugInfo, "%s. Unexpected debug value. \n", test.desc)
 	}
 }
 
