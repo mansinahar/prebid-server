@@ -106,7 +106,7 @@ type AuctionRequest struct {
 	RequestType pbsmetrics.RequestType
 	StartTime   time.Time
 	Aliases     map[string]string
-	RequestExt  *openrtb_ext.ExtRequest
+	Ext         *openrtb_ext.ExtRequest
 
 	// LegacyLabels is included here for temporary compatability with cleanOpenRTBRequests
 	// in HoldAuction until we get to factoring it away. Do not use for anything new.
@@ -124,23 +124,23 @@ type BidderRequest struct {
 
 func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *DebugLog) (*openrtb.BidResponse, error) {
 	var err error
-	r.RequestExt, err = extractBidRequestExt(r.BidRequest)
+	r.Ext, err = extractBidRequestExt(r.BidRequest)
 	if err != nil {
 		return nil, err
 	}
 
-	cacheInstructions := getExtCacheInstructions(r.RequestExt)
-	targData := getExtTargetData(r.RequestExt, &cacheInstructions)
+	cacheInstructions := getExtCacheInstructions(r.Ext)
+	targData := getExtTargetData(r.Ext, &cacheInstructions)
 	if targData != nil {
 		_, targData.cacheHost, targData.cachePath = e.cache.GetExtCacheData()
 	}
 
-	debugInfo := getDebugInfo(r.BidRequest, r.RequestExt)
+	debugInfo := getDebugInfo(r)
 	if debugInfo {
 		ctx = e.makeDebugContext(ctx, debugInfo)
 	}
 
-	bidAdjustmentFactors := getExtBidAdjustmentFactors(r.RequestExt)
+	bidAdjustmentFactors := getExtBidAdjustmentFactors(r.Ext)
 
 	recordImpMetrics(r.BidRequest, e.me)
 
@@ -179,9 +179,9 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 
 		var bidCategory map[string]string
 		//If includebrandcategory is present in ext then CE feature is on.
-		if r.RequestExt.Prebid.Targeting != nil && r.RequestExt.Prebid.Targeting.IncludeBrandCategory != nil {
+		if r.Ext.Prebid.Targeting != nil && r.Ext.Prebid.Targeting.IncludeBrandCategory != nil {
 			var rejections []string
-			bidCategory, adapterBids, rejections, err = applyCategoryMapping(ctx, r.RequestExt, adapterBids, e.categoriesFetcher, targData)
+			bidCategory, adapterBids, rejections, err = applyCategoryMapping(ctx, r.Ext, adapterBids, e.categoriesFetcher, targData)
 			if err != nil {
 				return nil, fmt.Errorf("Error in category mapping : %s", err.Error())
 			}
@@ -195,7 +195,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 			auc = newAuction(adapterBids, len(r.BidRequest.Imp), targData.preferDeals)
 			auc.setRoundedPrices(targData.priceGranularity)
 
-			if r.RequestExt.Prebid.SupportDeals {
+			if r.Ext.Prebid.SupportDeals {
 				dealErrs := applyDealSupport(r.BidRequest, auc, bidCategory)
 				errs = append(errs, dealErrs...)
 			}

@@ -99,12 +99,12 @@ func getAuctionBidders(req AuctionRequest) (bidderRequests []BidderRequest, errs
 
 	var sChainsByBidder map[string]*openrtb_ext.ExtRequestPrebidSChainSChain
 
-	sChainsByBidder, err = BidderToPrebidSChains(req.RequestExt)
+	sChainsByBidder, err = BidderToPrebidSChains(req.Ext)
 	if err != nil {
 		return nil, []error{err}
 	}
 
-	reqExt, err := getExtJson(req.BidRequest, req.RequestExt)
+	reqExt, err := getExtJson(req.BidRequest, req.Ext)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -479,8 +479,8 @@ func getExtTargetData(requestExt *openrtb_ext.ExtRequest, cacheInstructions *ext
 	return targData
 }
 
-func getDebugInfo(bidRequest *openrtb.BidRequest, requestExt *openrtb_ext.ExtRequest) bool {
-	return (bidRequest != nil && bidRequest.Test == 1) || (requestExt != nil && requestExt.Prebid.Debug)
+func getDebugInfo(req AuctionRequest) bool {
+	return (req.BidRequest != nil && req.BidRequest.Test == 1) || (req.Ext != nil && req.Ext.Prebid.Debug)
 }
 
 func getExtBidAdjustmentFactors(requestExt *openrtb_ext.ExtRequest) map[string]float64 {
