@@ -153,7 +153,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 	}
 
 	// Split Bid Request into Bidder specific requests
-	bidderRequests, errs := getAuctionBidders(r)
+	bidderRequests, errs := getAuctionBidderRequests(r)
 	if len(bidderRequests) == 0 {
 		return nil, errors.New("No valid bidders in request")
 	}
